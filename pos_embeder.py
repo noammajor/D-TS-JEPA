@@ -9,7 +9,7 @@ class PosEmbeder:
         
     def get_pos_embed(self, type='sine_cosine'):
         if type == 'sine_cosine':
-            self.pos_embed = self.sinusoidal_positional_encoding()
+            return self.sinusoidal_positional_encoding()
         else:
             raise NotImplementedError(f"Positional embedding type '{type}' is not implemented.")
     def sinusoidal_positional_encoding(self):
