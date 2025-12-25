@@ -18,8 +18,13 @@ def compute_discrete_jepa_loss(
     masks, 
     non_masks, # Add this to help predictor with context positions
     lambda_weights={'s2p': 1.0, 'p2s': 1.0, 'p2p': 1.0},
-    beta_vq=1.0
+    beta_vq=1.0,
+    current_global_step=0,
+    total_training_steps=100000,
+    vq_warmup = 0.15
     ):
+    #warm up for VQ loss
+    vq_weight = min(1.0, current_global_step /int(vq_warmup * total_training_steps))
     z_s_target = target_out["quantized_semantic"]
     z_p_target = target_out["data_patches"]
 
@@ -41,10 +46,10 @@ def compute_discrete_jepa_loss(
     l_vq = context_out["vq_loss"]
 
     total_loss = (
-        lambda_weights['s2p'] * l_s2p +
-        lambda_weights['p2s'] * l_p2s +
-        lambda_weights['p2p'] * l_p2p +
-        beta_vq * l_vq
+        lambda_weights['S2P'] * l_s2p +
+        lambda_weights['P2S'] * l_p2s +
+        lambda_weights['P2P'] * l_p2p +
+        vq_weight*beta_vq * l_vq
     )
     
     return total_loss, {
@@ -89,6 +94,8 @@ if __name__ == "__main__":
         config["batch_size"],
         config["ratio_patches"],
         config["mask_ratio"],
+        config["masking_type"],
+        config["num_semantic_tokens"]
     )
     input_dim = len(loader.dataset[0][0][0])
     encoder = Encoder(
@@ -126,11 +133,14 @@ if __name__ == "__main__":
     for m in predictor.modules():
         init_weights(m)
 
-    param_groups = [
-        {"params": (p for n, p in encoder.named_parameters())},
-        {"params": (p for n, p in predictor.named_parameters())},
-    ]
-    optimizer = torch.optim.AdamW(param_groups, lr=config["lr"])
+    codebook_params = [p for n, p in encoder.named_parameters() if "embedding" in n]
+    other_params = [p for n, p in encoder.named_parameters() if "embedding" not in n]
+    other_params += list(predictor.parameters())
+
+    optimizer = torch.optim.AdamW([
+    {"params": other_params, "lr": config["lr"]},
+    {"params": codebook_params, "lr": config["codebook_lr"]}  
+    ])
     steps_per_epoch = len(loader)
     total_steps = config["num_epochs"] * steps_per_epoch
 
@@ -169,7 +179,7 @@ if __name__ == "__main__":
     num_batches = len(loader)
     total_loss, total_var_encoder, total_var_decoder = 0.0, 0.0, 0.0
     save_model(encoder, 0)
-
+    current_global_step = 0
     # Training Loop
     for epoch in range(config["num_epochs"]):
         encoder.train()
@@ -177,31 +187,27 @@ if __name__ == "__main__":
         running_loss = 0.0
         running_perplexity = 0.0
 
-        for batch_x, _, _, _ in loader:
+        for patches, masks, non_masks in loader:
             optimizer.zero_grad()
             m = next(ema_scheduler)
-            batch_x = batch_x.to(device)
+            patches = patches.to(device)
+            current_global_step += 1
 
             #channel independence:
-            B, L, C = batch_x.shape
-            num_patches = config["num_patches"]
-
-            non_masks, masks = apply_mask(
-                B= B * C, 
-                num_patches=num_patches, 
-                type="block", 
-                p=config["mask_ratio"], 
-                device=device
-            )
-
+            B, L, C = patches.shape
             with torch.no_grad():
-                target_out = encoder_ema(batch_x)
+                target_out = encoder_ema(patches)
+                target_out["data_patches"] = F.layer_norm(
+                    target_out["data_patches"], 
+                    (target_out["data_patches"].size(-1),)
+                )
+                target_out = apply_mask(target_out, masks)
                 z_s_target = target_out["quantized_semantic"] 
                 #patches
                 z_p_target = target_out["data_patches"]
-            
-            context_out = encoder(batch_x, mask=non_masks)
 
+            
+            context_out = encoder(patches, mask=non_masks)
             loss, loss_dict = compute_discrete_jepa_loss(
                 context_out, 
                 target_out, 
@@ -209,7 +215,10 @@ if __name__ == "__main__":
                 masks, 
                 non_masks,
                 lambda_weights=config["lambda_weights"],
-                beta_vq=config["beta_vq"]
+                beta_vq=config["beta_vq"],
+                current_global_step=current_global_step,
+                total_training_steps=total_steps,
+                vq_warmup=config["vq_warmup"]
             )
             loss.backward()
         
