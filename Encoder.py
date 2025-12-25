@@ -71,18 +71,19 @@ class Encoder(nn.Module):
         self.mu = x.mean(dim=1, keepdim=True)
         self.sigma = torch.sqrt(x.var(dim=1, keepdim=True, unbiased=False) + 1e-5)
         x = (x - self.mu) / self.sigma
+        #channel independence
+        x = x.permute(0, 2, 1).reshape(B * C, L).reshape(B * C, self.num_patches, -1)
         #Encoder embedding
         x = self.tokenizer(x) 
         x = x + self.pos_embed
         if mask is not None:
             x = apply_mask(x, mask)  #[B, num_patches, D]
-        sem_tokens = self.semantic_tokens.expand(B, -1, -1) #creates pointer copies of tokens for each example in the batch
+        sem_tokens = self.semantic_tokens.expand(B * C, -1, -1) #creates pointer copies of tokens for each example in the batch
         x = torch.cat((x, sem_tokens), dim=1) #[B, num_patches + num_semantic, D]
 
         #transformer blocks
         for blk in self.predictor_blocks:
             x = blk(x)
-
         x = self.encoder_norm(x)
 
         out_semantic = x[:, -self.num_semantic_tokens:, :]
@@ -93,5 +94,7 @@ class Encoder(nn.Module):
             "discrete_indices": indices,
             "data_patches": data_patches,
             "vq_loss": vq_loss,
-            "perplexity": perplexity
+            "perplexity": perplexity,
+            "orig_B": B,
+            "orig_C": C
         }

@@ -9,6 +9,7 @@ from Predictors import Predictor
 from mask_utils import apply_mask
 from src.data_loaders.data_loader import get_jepa_loaders
 from config.config_pretrain import config
+from main.utils import init_weights
 
 def compute_discrete_jepa_loss(
     context_out, 
@@ -19,11 +20,11 @@ def compute_discrete_jepa_loss(
     lambda_weights={'s2p': 1.0, 'p2s': 1.0, 'p2p': 1.0},
     beta_vq=1.0
     ):
-    z_s_target = target_out["quantized_semantic"] # [B, num_sem, D]
-    z_p_target = target_out["data_patches"]      # [B, N, D] (Full Sequence)
+    z_s_target = target_out["quantized_semantic"]
+    z_p_target = target_out["data_patches"]
 
-    z_s_context = context_out["quantized_semantic"] # [B, num_sem, D]
-    z_p_context = context_out["data_patches"]      # [B, K, D] (Gathered context)
+    z_s_context = context_out["quantized_semantic"] 
+    z_p_context = context_out["data_patches"]
 
     mask_idx = masks.unsqueeze(-1).expand(-1, -1, z_p_target.size(-1))
     target_p_masked = torch.gather(z_p_target, dim=1, index=mask_idx) # [B, M, D]
@@ -52,6 +53,7 @@ def compute_discrete_jepa_loss(
         'l_p2p': l_p2p.item(),
         'l_vq': l_vq.item()
     }
+    
 def save_model(encoder, target_encoder, predictor, optimizer, epoch, path_save):
     save_dict = {
         "epoch": epoch,
@@ -174,22 +176,31 @@ if __name__ == "__main__":
         predictor.train()
         running_loss = 0.0
         running_perplexity = 0.0
-        
-        for patches, masks, non_masks in loader:
+
+        for batch_x, _, _, _ in loader:
             optimizer.zero_grad()
             m = next(ema_scheduler)
-            patches = patches.to(device)
-            masks = masks.to(device)
-            non_masks = non_masks.to(device)
+            batch_x = batch_x.to(device)
+
+            #channel independence:
+            B, L, C = batch_x.shape
+            num_patches = config["num_patches"]
+
+            non_masks, masks = apply_mask(
+                B= B * C, 
+                num_patches=num_patches, 
+                type="block", 
+                p=config["mask_ratio"], 
+                device=device
+            )
 
             with torch.no_grad():
-                target_out = encoder_ema(patches)
-                #semantic
+                target_out = encoder_ema(batch_x)
                 z_s_target = target_out["quantized_semantic"] 
                 #patches
                 z_p_target = target_out["data_patches"]
             
-            context_out = encoder(patches, mask=non_masks)
+            context_out = encoder(batch_x, mask=non_masks)
 
             loss, loss_dict = compute_discrete_jepa_loss(
                 context_out, 
