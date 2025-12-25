@@ -65,12 +65,17 @@ class Encoder(nn.Module):
 
         self.jepa = jepa
 
-        def forward(self, x, mask=None):
+    def forward(self, x, mask=None):
         B, L, D = x.shape #[Batch, Patches, Patch_Len]
+        #RevIN normalization
+        self.mu = x.mean(dim=1, keepdim=True)
+        self.sigma = torch.sqrt(x.var(dim=1, keepdim=True, unbiased=False) + 1e-5)
+        x = (x - self.mu) / self.sigma
+        #Encoder embedding
         x = self.tokenizer(x) 
         x = x + self.pos_embed
         if mask is not None:
-            x = apply_mask(x, mask.unsqueeze(-1))  #[B, num_patches, D]
+            x = apply_mask(x, mask)  #[B, num_patches, D]
         sem_tokens = self.semantic_tokens.expand(B, -1, -1) #creates pointer copies of tokens for each example in the batch
         x = torch.cat((x, sem_tokens), dim=1) #[B, num_patches + num_semantic, D]
 
