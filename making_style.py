@@ -1,4 +1,4 @@
-mport torch
+import torch
 
 def get_mask_style(B, num_patches, type="bernoulli", p=0.5, device='cpu'):
     """
@@ -28,7 +28,7 @@ def get_block_indices(B, num_patches, block_size, device):
     
     for _ in range(B):
         all_idx = torch.arange(num_patches, device=device)
-        start = torch.randint(0, num_patches - block_size, (1,)).item()
+        start = torch.randint(0, num_patches - block_size+1, (1,)).item()
         
         t_idx = all_idx[start : start + block_size]
         c_idx = torch.cat([all_idx[:start], all_idx[start + block_size :]])

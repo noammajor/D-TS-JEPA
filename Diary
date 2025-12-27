@@ -1,2 +1,8 @@
 19/12/2025 - start date
 20/12/2025 - Encoder, Mask basic, Positional embedder basic, Predictor, VQ
+data loader - 
+
+
+
+tasks:
+1. preplexity fixer; if there is codebook colapse - reshuffle

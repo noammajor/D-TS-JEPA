@@ -32,7 +32,7 @@ class DataPuller():
         self.type_data = type_data
         self.patch_size = patch_size
         self.chunk_size = self.patch_size * self.ratio_patches
-        self.chunk_map = []
+        self.all_map = []
 
         processed_dfs = []
         self.Train_Val_Test_splits = {
@@ -57,19 +57,18 @@ class DataPuller():
             self.Train_Val_Test_splits['train'].append(train_df)
             self.Train_Val_Test_splits['val'].append(val_df)
             self.Train_Val_Test_splits['test'].append(test_df)
-        active_data_list = self.Train_Val_Test_splits[self.amount_per_split]
         
         for split_name in ['train', 'val', 'test']:
             for file_idx, tensor in enumerate(self.Train_Val_Test_splits[split_name]):
                 num_chunks = (tensor.size(0) + self.chunk_size - 1) // self.chunk_size
                 for chunk_idx in range(num_chunks):
-                    self.all_maps[split_name].append((file_idx, chunk_idx))
+                    self.all_map[split_name].append((file_idx, chunk_idx))
 
     def __len__(self):
-        return len(self.all_maps[self.which])
+        return len(self.all_map[self.which])
    
     def __getitem__(self, idx, type_split='train'):
-        file_idx, chunk_offset = self.all_maps[type_split][idx]
+        file_idx, chunk_offset = self.all_map[type_split][idx]
         source_data = self.Train_Val_Test_splits[type_split][file_idx]
         start = chunk_offset * self.chunk_size
         end = start + self.chunk_size
