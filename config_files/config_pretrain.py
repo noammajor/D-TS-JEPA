@@ -6,9 +6,10 @@ config = {
     "num_epochs": 5001,
     "ema_momentum" : 0.998,
     "codebook_lr" : 1e-5,
+    "weight_decay" : 5e-2,
 
     #masking
-    "mask_ratio" : 0.5,
+    "mask_ratio" : 0.25,
     "masking_type" : "block",
 
     #encoder
@@ -24,7 +25,8 @@ config = {
     "kernel_size" : 3,
     "embed_bias" : True,
     "codebook_size" : 512,
-    "commitment_cost" : 0.25, 
+    "commitment_cost" : 0.25,
+    "patch_size": 8,
 
     #predictor
     "predictor_embed_dim": 64,
@@ -49,6 +51,14 @@ config = {
         "S2P": 1.0,
         "P2S": 1.0,
     },
-    "beta_vq" : 1.0,
+    "beta_vq" : 0.01,
     "vq_warmup": 0.15,
+
+    #data paths
+    "timestampcols" : ['date'],
+    "input_variables" : ['OT' , "T (degC)", "Tpot (K)","Tdew (degC)","rh (%)"],
+    "val_prec": 0.1,
+    "test_prec": 0.25,
+    "path_data" : ['./data/weather.csv'],
+
 }

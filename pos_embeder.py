@@ -2,10 +2,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-class PosEmbeder:
+class PosEmbeder(nn.Module):
     def __init__(self, dim, num_patches):
+        super().__init__()
         self.dim = dim
         self.num_patches = num_patches
+        pos_tensor = self.sinusoidal_positional_encoding()
+        self.register_buffer('pos_embed', pos_tensor)
         
     def get_pos_embed(self, type='sine_cosine'):
         if type == 'sine_cosine':
@@ -24,4 +27,7 @@ class PosEmbeder:
         emb_cos = np.cos(out)
         pos_emb = np.concatenate([emb_sin, emb_cos], axis=1)
         tensor = torch.from_numpy(pos_emb).float().unsqueeze(0)  # Shape: [1, num_patches, dim]
-        return nn.Parameter(tensor_emb, requires_grad=False)
+        #return nn.Parameter(tensor, requires_grad=False)
+        return tensor
+    def forward(self, x):
+        return x + self.pos_embed

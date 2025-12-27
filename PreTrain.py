@@ -5,11 +5,14 @@ import torch
 import torch.nn.functional as F
 import torch.optim.lr_scheduler as lr_scheduler
 from Encoder import Encoder
-from Predictors import Predictor
-from mask_utils import apply_mask
-from src.data_loaders.data_loader import get_jepa_loaders
-from config.config_pretrain import config
+from Predictors import DiscreteJEPAPredictor as Predictor
+from data_loaders.data_puller import DataPuller
+from mask_util import apply_mask
+from data_loaders.data_factory import get_jepa_loaders
+from config_files.config_pretrain import config
 from main.utils import init_weights
+from utils.modules import MLP, Block
+from pos_embeder import PosEmbeder
 
 def compute_discrete_jepa_loss(
     context_out, 
@@ -27,28 +30,30 @@ def compute_discrete_jepa_loss(
     vq_weight = min(1.0, current_global_step /int(vq_warmup * total_training_steps))
     z_s_target = target_out["quantized_semantic"]
     z_p_target = target_out["data_patches"]
-
+    print(z_s_target.shape, z_p_target.shape)
     z_s_context = context_out["quantized_semantic"] 
     z_p_context = context_out["data_patches"]
+    print(z_s_context.shape, z_p_context.shape)
 
-    mask_idx = masks.unsqueeze(-1).expand(-1, -1, z_p_target.size(-1))
-    target_p_masked = torch.gather(z_p_target, dim=1, index=mask_idx) # [B, M, D]
+    #mask_idx = masks.unsqueeze(-1).expand(-1, -1, z_p_target.size(-1))
+    #target_p_masked = torch.gather(z_p_target, dim=1, index=mask_idx) # [B, M, D]
 
     pred_s2p = predictor(z_s_context, target_mask=masks, task='S2P')
-    l_s2p = F.mse_loss(pred_s2p, target_p_masked)
+    l_s2p = F.mse_loss(pred_s2p, z_p_target)
 
-    pred_p2s = predictor(z_p_context, non_masks=non_masks, task='P2S')
+    pred_p2s = predictor(z_p_context, target_mask=None, task='P2S')
+    print(pred_p2s.shape, z_s_target.shape)
     l_p2s = F.mse_loss(pred_p2s, z_s_target)
 
-    pred_p2p = predictor(z_p_context, target_mask=masks, non_masks=non_masks, task='P2P')
-    l_p2p = F.mse_loss(pred_p2p, target_p_masked)
+    pred_p2p = predictor(z_p_context, target_mask=masks, task='P2P')
+    l_p2p = F.mse_loss(pred_p2p, z_p_target)
 
     l_vq = context_out["vq_loss"]
 
     total_loss = (
-        lambda_weights['S2P'] * l_s2p +
-        lambda_weights['P2S'] * l_p2s +
-        lambda_weights['P2P'] * l_p2p +
+        lambda_weights["S2P"] * l_s2p +
+        lambda_weights["P2S"] * l_p2s +
+        lambda_weights["P2P"] * l_p2p +
         vq_weight*beta_vq * l_vq
     )
     
@@ -58,17 +63,65 @@ def compute_discrete_jepa_loss(
         'l_p2p': l_p2p.item(),
         'l_vq': l_vq.item()
     }
+
+def evaluate(encoder,
+                predictor,
+                dataloader,
+                device,
+                config,
+                lambda_weights,
+                beta_vq,
+                current_global_step,
+                total_training_steps,
+                vq_warmup):
+    encoder.eval()
+    predictor.eval()
+    val_loss = 0.0
+    val_metrics = {'l_s2p': 0.0, 'l_p2s': 0.0, 'l_p2p': 0.0, 'l_vq': 0.0}
+    with torch.no_grad():
+        for patches, masks, non_masks in dataloader:
+            patches, masks, non_masks = patches.to(device), masks.to(device), non_masks.to(device)
+            target_out = encoder(patches)
+            target_out = apply_mask(target_out, masks)
+            
+            context_out = encoder(patches, mask=non_masks)
+            loss, loss_dict = compute_discrete_jepa_loss(
+                context_out, 
+                target_out, 
+                predictor, 
+                masks, 
+                non_masks,
+                lambda_weights=lambda_weights,
+                beta_vq=beta_vq,
+                current_global_step=current_global_step,
+                total_training_steps=total_training_steps,
+                vq_warmup=vq_warmup
+            )
+            val_loss += loss.item()
+            for k, v in loss_dict.items():
+                val_metrics[k] += v
+    return val_loss / len(dataloader), {k: v / len(dataloader) for k, v in val_metrics.items()} 
     
 def save_model(encoder, target_encoder, predictor, optimizer, epoch, path_save):
+    checkpoint_dir = os.path.dirname(path_save)
+    if checkpoint_dir and not os.path.exists(checkpoint_dir):
+        try:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            print(f"Created directory: {checkpoint_dir}")
+        except Exception as e:
+            print(f"Could not create directory {checkpoint_dir}: {e}")
+            return # Exit if we can't create the folder
+
     save_dict = {
         "epoch": epoch,
         "encoder": encoder.state_dict(),
-        "target_encoder": target_encoder.state_dict(), # The EMA Teacher 
-        "predictor": predictor.state_dict(),           # The 3-head predictor [cite: 118, 133]
-        "optimizer": optimizer.state_dict(),           # Critical for resuming training
+        "target_encoder": target_encoder.state_dict(), 
+        "predictor": predictor.state_dict(),           
+        "optimizer": optimizer.state_dict(),           
     }
 
     try:
+        # 3. Save the file
         path_name = f"{path_save}_epoch_{epoch}.pt"
         torch.save(save_dict, path_name)
         print(f"Checkpoint saved: {path_name}")
@@ -87,19 +140,39 @@ def lr_lambda(epoch):
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
-    config = prepare_args_pretrain(config)
+    #config = prepare_args_pretrain(config)
     # Load Data
-    loader = get_jepa_loaders(
-        config["path_data"],
-        config["batch_size"],
-        config["ratio_patches"],
-        config["mask_ratio"],
-        config["masking_type"],
-        config["num_semantic_tokens"]
+    train_dataset = DataPuller(
+        data_paths=config["path_data"],
+        patch_size=config["patch_size"],
+        batch_size=config["batch_size"],
+        ratio_patches=config["ratio_patches"],
+        mask_ratio=config["mask_ratio"],
+        masking_type=config["masking_type"],
+        num_semantic_tokens=config["num_semantic_tokens"],
+        input_variables=config["input_variables"],
+        timestamp_cols=config["timestampcols"],
+        type_data='train',
+        val_prec=config["val_prec"],
+        test_prec=config["test_prec"]
     )
-    input_dim = len(loader.dataset[0][0][0])
+
+    # Create Validation Dataset (Copy the master, change the pointer)
+    val_dataset = copy.copy(train_dataset)
+    val_dataset.which = 'val'
+
+    # Create Test Dataset
+    test_dataset = copy.copy(train_dataset)
+    test_dataset.which = 'test'
+
+    # Create Loaders
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=False)
+    input_dim = len(train_loader.dataset[0][0][0])
+    
     encoder = Encoder(
-        num_patches=len(loader.dataset[0][0]),
+        num_patches=len(train_loader.dataset[0][0]),
         num_semantic_tokens=config["num_semantic_tokens"],
         dim_in=input_dim,
         kernel_size=config["kernel_size"],
@@ -119,7 +192,7 @@ if __name__ == "__main__":
         commitment_cost=config["commitment_cost"]
     )
     predictor = Predictor(
-        num_patches=len(loader.dataset[0][0]),
+        num_patches=len(train_loader.dataset[0][0]),
         num_semantic_tokens=config["num_semantic_tokens"],
         embed_dim=config["encoder_embed_dim"],
         predictor_embed_dim=config["predictor_embed_dim"],
@@ -140,8 +213,8 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW([
     {"params": other_params, "lr": config["lr"]},
     {"params": codebook_params, "lr": config["codebook_lr"]}  
-    ])
-    steps_per_epoch = len(loader)
+    ], weight_decay=config["weight_decay"])
+    steps_per_epoch = len(train_loader)
     total_steps = config["num_epochs"] * steps_per_epoch
 
     # mimicing the D-JEPA paper
@@ -176,25 +249,25 @@ if __name__ == "__main__":
         / (config["num_epochs"] * config["ipe_scale"])
         for i in range(int(config["num_epochs"] * config["ipe_scale"]) + 1)
     )
-    num_batches = len(loader)
+    num_batches = steps_per_epoch
+    best_val_loss = float("inf")
     total_loss, total_var_encoder, total_var_decoder = 0.0, 0.0, 0.0
-    save_model(encoder, 0)
+    save_model(encoder, encoder_ema, predictor,optimizer, 0, f"{path_save}_INITIAL")
     current_global_step = 0
     # Training Loop
     for epoch in range(config["num_epochs"]):
+        print(f"Starting Epoch {epoch}/{config['num_epochs']}")
         encoder.train()
         predictor.train()
         running_loss = 0.0
         running_perplexity = 0.0
 
-        for patches, masks, non_masks in loader:
+        for patches, masks, non_masks in train_loader:
             optimizer.zero_grad()
             m = next(ema_scheduler)
             patches = patches.to(device)
             current_global_step += 1
-
-            #channel independence:
-            B, L, C = patches.shape
+            print(patches.shape)
             with torch.no_grad():
                 target_out = encoder_ema(patches)
                 target_out["data_patches"] = F.layer_norm(
@@ -236,12 +309,25 @@ if __name__ == "__main__":
             running_loss += loss.item()
             running_perplexity += context_out["perplexity"].item()
 
-        
-        epoch_avg_loss = running_loss / len(loader)
-        epoch_avg_perplexity = running_perplexity / len(loader)
+        epoch_avg_loss = running_loss / len(train_loader)
+        epoch_avg_perplexity = running_perplexity / len(train_loader)
+        print(f"Epoch {epoch} completed. Avg Loss: {epoch_avg_loss:.4f}, Avg Perplexity: {epoch_avg_perplexity:.4f}")
 
         if epoch % 10 == 0:
             print(f"Epoch {epoch}, lr: {optimizer.param_groups[0]['lr']:.3g} - JEPA Loss: {total_loss:.4f},")
 
         if epoch % checkpoint_save == 0 and epoch != 0:
             save_model(encoder, epoch)
+        val_loss, val_dict = evaluate(encoder, predictor, val_loader, device, config, config["lambda_weights"], config["beta_vq"], current_global_step, total_steps, config["vq_warmup"])
+        
+        print(f"Epoch {epoch} | Train Loss: {epoch_avg_loss:.4f} | Val Loss: {val_loss:.4f}")
+        
+        # Save Best Model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_model(encoder, encoder_ema, predictor, optimizer, epoch, f"{path_save}_BEST")
+            print("New best validation loss! Model saved.")
+
+    print("Training complete. Starting Final Test:")
+    test_loss, test_dict = evaluate(encoder, predictor, test_loader, device, config, total_steps, total_steps)
+    print(f"FINAL TEST RESULTS | Loss: {test_loss:.4f} | S2P: {test_dict['l_s2p']:.4f}")

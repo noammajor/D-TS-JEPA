@@ -2,10 +2,9 @@ import pandas as pd
 import torch
 import random
 from torch.utils.data import Dataset
-from data_loaders.data_factory import data_factory
 from making_style import get_mask_style
 
-class DataPuller():
+class DataPuller(Dataset):
     def __init__(self, 
     data_paths,
     patch_size,
@@ -14,7 +13,7 @@ class DataPuller():
     mask_ratio,
     masking_type,
     num_semantic_tokens,
-    input_varaibles,
+    input_variables,
     timestamp_cols,
     type_data,
     val_prec = 0.1,
@@ -24,15 +23,15 @@ class DataPuller():
         self.mask_ratio = mask_ratio
         self.masking_type = masking_type
         self.num_semantic_tokens = num_semantic_tokens
-        self.input_varaibles = input_varaibles
+        self.input_variables = input_variables
         self.timestamp_cols = timestamp_cols
         self.data_paths = data_paths
         self.val_prec = val_prec
         self.test_prec = test_prec
-        self.type_data = type_data
+        self.which = type_data  # 'train', 'val', 'test'
         self.patch_size = patch_size
         self.chunk_size = self.patch_size * self.ratio_patches
-        self.all_map = []
+        self.all_map = {'train': [], 'val': [], 'test': []}
 
         processed_dfs = []
         self.Train_Val_Test_splits = {
@@ -52,7 +51,7 @@ class DataPuller():
             val_len = int(len(df) * self.val_prec)
             test_len = int(len(df) * self.test_prec)
             train_len = len(df) - val_len - test_len
-            df = torch.tensor(df[self.input_varaibles].values).float()
+            df = torch.tensor(df[self.input_variables].values).float()
             train_df, val_df, test_df = torch.split(df, [train_len, val_len, test_len])
             self.Train_Val_Test_splits['train'].append(train_df)
             self.Train_Val_Test_splits['val'].append(val_df)
@@ -67,9 +66,9 @@ class DataPuller():
     def __len__(self):
         return len(self.all_map[self.which])
    
-    def __getitem__(self, idx, type_split='train'):
-        file_idx, chunk_offset = self.all_map[type_split][idx]
-        source_data = self.Train_Val_Test_splits[type_split][file_idx]
+    def __getitem__(self, idx):
+        file_idx, chunk_offset = self.all_map[self.which][idx]
+        source_data = self.Train_Val_Test_splits[self.which][file_idx]
         start = chunk_offset * self.chunk_size
         end = start + self.chunk_size
         chunk = source_data[start:end]
@@ -83,5 +82,5 @@ class DataPuller():
             type=self.masking_type, 
             p=self.mask_ratio
         )
-        return patches_tensor, context_idx, target_idx
+        return patches_tensor, context_idx.squeeze(0), target_idx.squeeze(0)
 

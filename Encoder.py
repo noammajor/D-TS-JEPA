@@ -3,13 +3,15 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from .VQ import *
-from .mask_util import *
-from .utils.modules import *
+from VQ import *
+from mask_util import *
+from utils.modules import *
+from pos_embeder import PosEmbeder
+from Tokenizer import TS_Tokenizer
 
 
 class Encoder(nn.Module):
-     def __init__(
+    def __init__(
         self,
         num_patches,
         num_semantic_tokens,
@@ -30,7 +32,7 @@ class Encoder(nn.Module):
         codebook_size=512,
         commitment_cost=0.25
     ):
-    super().__init__()
+        super().__init__()
 
         self.embed_dim = embed_dim
         self.num_patches = num_patches
@@ -44,8 +46,8 @@ class Encoder(nn.Module):
         self.pos_embed = nn.Parameter(
             torch.zeros(1, self.num_patches, self.embed_dim), requires_grad=False
         )
-        embedder = PosEmbeder(dim=embed_dim, num_patches=num_patches)
-        self.pos_embed = embedder.get_pos_embed(type='sine_cosine')
+
+        self.pos_embed_layer = PosEmbeder(dim=embed_dim, num_patches=num_patches)
 
         self.predictor_blocks = nn.ModuleList([
             Block(
@@ -62,23 +64,30 @@ class Encoder(nn.Module):
             embedding_dim=embed_dim,
             commitment_cost=commitment_cost
         )
+        self.tokenizer = TS_Tokenizer(
+            dim_in=dim_in,  
+            kernel_size=kernel_size,
+            embed_dim=embed_dim,
+            embed_bias=embed_bias,
+            activation=embed_activation
+        )
 
         self.jepa = jepa
 
     def forward(self, x, mask=None):
-        B, L, D = x.shape #[Batch, Patches, Patch_Len]
+        B, P, P_L , F = x.shape #[Batch, Patches, Patch_Len]
         #RevIN normalization
         self.mu = x.mean(dim=1, keepdim=True)
         self.sigma = torch.sqrt(x.var(dim=1, keepdim=True, unbiased=False) + 1e-5)
         x = (x - self.mu) / self.sigma
         #channel independence
-        x = x.permute(0, 2, 1).reshape(B * C, L).reshape(B * C, self.num_patches, -1)
+        x = x.permute(0, 3, 1, 2).reshape(B * F, P, P_L)
         #Encoder embedding
         x = self.tokenizer(x) 
-        x = x + self.pos_embed
+        x = self.pos_embed_layer(x)
         if mask is not None:
             x = apply_mask(x, mask)  #[B, num_patches, D]
-        sem_tokens = self.semantic_tokens.expand(B * C, -1, -1) #creates pointer copies of tokens for each example in the batch
+        sem_tokens = self.semantic_tokens.expand(B * F, -1, -1) #creates pointer copies of tokens for each example in the batch
         x = torch.cat((x, sem_tokens), dim=1) #[B, num_patches + num_semantic, D]
 
         #transformer blocks
@@ -96,5 +105,5 @@ class Encoder(nn.Module):
             "vq_loss": vq_loss,
             "perplexity": perplexity,
             "orig_B": B,
-            "orig_C": C
+            "orig_F": F
         }

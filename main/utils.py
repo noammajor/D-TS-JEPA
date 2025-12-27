@@ -1,3 +1,5 @@
+import torch
+import torch.nn as nn
 def init_weights(m):
     # 1. Linear Layers: The workhorses for S2P, P2S, and P2P predictions
     if isinstance(m, torch.nn.Linear):
