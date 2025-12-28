@@ -1,22 +1,22 @@
 config = {
 
     #learning rates
-    "lr": 6e-5,
+    "lr": 5e-4,
     "end_lr": 1e-4,
     "num_epochs": 5001,
-    "ema_momentum" : 0.998,
-    "codebook_lr" : 1e-5,
+    "ema_momentum" : 0.9,
+    "codebook_lr" : 1e-4,
     "weight_decay" : 5e-2,
 
     #masking
-    "mask_ratio" : 0.25,
+    "mask_ratio" : 0.5,
     "masking_type" : "block",
 
     #encoder
     "num_semantic_tokens" : 4,
     "encoder_embed_dim" : 128,
     "nhead" : 8,
-    "num_encoder_layers" : 4,
+    "num_encoder_layers" : 12,
     "mlp_ratio" : 4.0,
     "qkv_bias" : True,
     "qk_scale" : None,
@@ -24,7 +24,7 @@ config = {
     "attn_drop_rate" : 0.1,
     "kernel_size" : 3,
     "embed_bias" : True,
-    "codebook_size" : 512,
+    "codebook_size" : 128,
     "commitment_cost" : 0.25,
     "patch_size": 8,
 
@@ -49,14 +49,14 @@ config = {
     "lambda_weights" : {
         "P2P": 1.0,
         "S2P": 1.0,
-        "P2S": 1.0,
+        "P2S": 10.0,
     },
-    "beta_vq" : 0.01,
-    "vq_warmup": 0.15,
+    "beta_vq" : 3.0,
+    "vq_warmup": 0.01,
 
     #data paths
     "timestampcols" : ['date'],
-    "input_variables" : ['OT' , "T (degC)", "Tpot (K)","Tdew (degC)","rh (%)"],
+    "input_variables" : ['OT' , "T (degC)", "Tpot (K)","Tdew (degC)","rh (%)","VPmax (mbar)","VPact (mbar)","VPdef (mbar)","sh (g/kg)", "H2OC (mmol/mol)","rho (g/m**3)","wv (m/s)","max. wv (m/s)","wd (deg)"],
     "val_prec": 0.1,
     "test_prec": 0.25,
     "path_data" : ['./data/weather.csv'],

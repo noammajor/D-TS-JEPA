@@ -95,7 +95,10 @@ class Encoder(nn.Module):
             x = blk(x)
         x = self.encoder_norm(x)
 
+        #x = torch.nn.functional.normalize(x, p=2, dim=-1)
+
         out_semantic = x[:, -self.num_semantic_tokens:, :]
+        out_semantic = torch.nn.functional.normalize(out_semantic, p=2, dim=-1)
         data_patches = x[:, :-self.num_semantic_tokens, :]
         vq_loss, quantized_sem, perplexity, indices = self.vector_quantizer(out_semantic)
         return {

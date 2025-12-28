@@ -4,6 +4,8 @@ import copy
 import torch
 import torch.nn.functional as F
 import torch.optim.lr_scheduler as lr_scheduler
+import os
+from torchviz import make_dot
 from Encoder import Encoder
 from Predictors import DiscreteJEPAPredictor as Predictor
 from data_loaders.data_puller import DataPuller
@@ -19,34 +21,50 @@ def compute_discrete_jepa_loss(
     target_out, 
     predictor, 
     masks, 
-    non_masks, # Add this to help predictor with context positions
+    non_masks,
     lambda_weights={'s2p': 1.0, 'p2s': 1.0, 'p2p': 1.0},
     beta_vq=1.0,
     current_global_step=0,
     total_training_steps=100000,
-    vq_warmup = 0.15
+    vq_warmup = 0.15,
+    batch_idx=0
     ):
     #warm up for VQ loss
-    vq_weight = min(1.0, current_global_step /int(vq_warmup * total_training_steps))
+    #vq_weight = min(1.0, current_global_step /int(vq_warmup * total_training_steps))
     z_s_target = target_out["quantized_semantic"]
     z_p_target = target_out["data_patches"]
-    print(z_s_target.shape, z_p_target.shape)
     z_s_context = context_out["quantized_semantic"] 
     z_p_context = context_out["data_patches"]
-    print(z_s_context.shape, z_p_context.shape)
-
-    #mask_idx = masks.unsqueeze(-1).expand(-1, -1, z_p_target.size(-1))
-    #target_p_masked = torch.gather(z_p_target, dim=1, index=mask_idx) # [B, M, D]
 
     pred_s2p = predictor(z_s_context, target_mask=masks, task='S2P')
-    l_s2p = F.mse_loss(pred_s2p, z_p_target)
+    l_s2p = F.mse_loss(pred_s2p, z_p_target.detach())
 
     pred_p2s = predictor(z_p_context, target_mask=None, task='P2S')
-    print(pred_p2s.shape, z_s_target.shape)
-    l_p2s = F.mse_loss(pred_p2s, z_s_target)
+    l_p2s = F.mse_loss(pred_p2s, z_s_target.detach())
+    with torch.no_grad():
+            # 1. Is the Teacher actually producing diverse data?
+            # If this is < 0.001, your Teacher has collapsed.
+        t_var = z_s_target.std(dim=0).mean().item()
+            
+            # 2. Is the Student "cheating" by just mirroring the Teacher?
+            # We calculate similarity between the prediction and the target.
+        cos = torch.nn.CosineSimilarity(dim=-1)
+        p2s_sim = cos(pred_p2s, z_s_target).mean().item()
+            
+            # 3. Information Leakage: Does the prediction look exactly like the first patch?
+            # If this is > 0.9, your semantic tokens are just "copying" patch 0.
+        leakage = cos(pred_p2s[:, 0, :], z_p_context[:, 0, :]).mean().item()
+        if batch_idx % 10 == 0:
+            print(f"\n--- Batch {batch_idx} Diagnostics ---")
+            print(f"Shapes: Pred {pred_p2s.shape} | Target {z_s_target.shape}")
+            print(f"Teacher Latent Var: {t_var:.6f} (Should be > 0.01)")
+            print(f"P2S Similarity:     {p2s_sim:.4f} (If 0.99 + Low Loss = Cheating)")
+            print(f"Input Leakage:      {leakage:.4f} (If high, attention is too direct)")
+            print(f"Current P2S Loss:   {F.mse_loss(pred_p2s, z_s_target).item():.4f}")
+            print("---------------------------------\n")
 
     pred_p2p = predictor(z_p_context, target_mask=masks, task='P2P')
-    l_p2p = F.mse_loss(pred_p2p, z_p_target)
+    l_p2p = F.mse_loss(pred_p2p, z_p_target.detach())
 
     l_vq = context_out["vq_loss"]
 
@@ -54,9 +72,9 @@ def compute_discrete_jepa_loss(
         lambda_weights["S2P"] * l_s2p +
         lambda_weights["P2S"] * l_p2s +
         lambda_weights["P2P"] * l_p2p +
-        vq_weight*beta_vq * l_vq
+        beta_vq * l_vq
     )
-    
+    print(f"Losses => S2P: {l_s2p.item():.4f}, P2S: {l_p2s.item():.4f}, P2P: {l_p2p.item():.4f}, VQ: {l_vq.item():.4f}")
     return total_loss, {
         'l_s2p': l_s2p.item(),
         'l_p2s': l_p2s.item(),
@@ -85,6 +103,7 @@ def evaluate(encoder,
             target_out = apply_mask(target_out, masks)
             
             context_out = encoder(patches, mask=non_masks)
+            print("VALLLLL")
             loss, loss_dict = compute_discrete_jepa_loss(
                 context_out, 
                 target_out, 
@@ -211,9 +230,9 @@ if __name__ == "__main__":
     other_params += list(predictor.parameters())
 
     optimizer = torch.optim.AdamW([
-    {"params": other_params, "lr": config["lr"]},
-    {"params": codebook_params, "lr": config["codebook_lr"]}  
-    ], weight_decay=config["weight_decay"])
+    {"params": other_params, "lr": config["lr"], "weight_decay": config["weight_decay"]},
+    {"params": codebook_params, "lr": config["codebook_lr"], "weight_decay": 0.0}
+    ])
     steps_per_epoch = len(train_loader)
     total_steps = config["num_epochs"] * steps_per_epoch
 
@@ -224,7 +243,7 @@ if __name__ == "__main__":
     total_steps=total_steps,
     pct_start=0.05,                  # 5% warmup as per TD-JEPA
     anneal_strategy='cos',           # Cosine decay is standard used in D-JEPA]
-    div_factor=25.0,                 # defualt = Initial lr = max_lr / 25
+    div_factor=10.0,                 # defualt = Initial lr = max_lr / 25
     final_div_factor=1e4             # defualt
     )
     encoder = encoder.to(device)
@@ -245,9 +264,9 @@ if __name__ == "__main__":
     ema_scheduler = (
         config["ema_momentum"]
         + i
-        * (1 - config["ema_momentum"])
-        / (config["num_epochs"] * config["ipe_scale"])
-        for i in range(int(config["num_epochs"] * config["ipe_scale"]) + 1)
+        * (0.999 - config["ema_momentum"])
+        / (config["num_epochs"] * len(train_loader))
+        for i in range(int(config["num_epochs"] *len(train_loader)) + 1)
     )
     num_batches = steps_per_epoch
     best_val_loss = float("inf")
@@ -262,7 +281,7 @@ if __name__ == "__main__":
         running_loss = 0.0
         running_perplexity = 0.0
 
-        for patches, masks, non_masks in train_loader:
+        for batch_idx, (patches, masks, non_masks) in enumerate(train_loader):
             optimizer.zero_grad()
             m = next(ema_scheduler)
             patches = patches.to(device)
@@ -291,11 +310,10 @@ if __name__ == "__main__":
                 beta_vq=config["beta_vq"],
                 current_global_step=current_global_step,
                 total_training_steps=total_steps,
-                vq_warmup=config["vq_warmup"]
+                vq_warmup=config["vq_warmup"],
+                batch_idx=batch_idx
             )
             loss.backward()
-        
-            # Gradient clipping is vital for VQ-based models
             torch.nn.utils.clip_grad_norm_(encoder.parameters(), config["clip_grad"])
             torch.nn.utils.clip_grad_norm_(predictor.parameters(), config["clip_grad"])
             
@@ -310,6 +328,7 @@ if __name__ == "__main__":
             running_perplexity += context_out["perplexity"].item()
 
         epoch_avg_loss = running_loss / len(train_loader)
+        total_loss += epoch_avg_loss
         epoch_avg_perplexity = running_perplexity / len(train_loader)
         print(f"Epoch {epoch} completed. Avg Loss: {epoch_avg_loss:.4f}, Avg Perplexity: {epoch_avg_perplexity:.4f}")
 

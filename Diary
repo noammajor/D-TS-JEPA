@@ -6,3 +6,4 @@ data loader -
 
 tasks:
 1. preplexity fixer; if there is codebook colapse - reshuffle
+2. normalization added to VQ - need to test if actually helpful. may be killing it
