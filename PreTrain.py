@@ -103,7 +103,6 @@ def evaluate(encoder,
             target_out = apply_mask(target_out, masks)
             
             context_out = encoder(patches, mask=non_masks)
-            print("VALLLLL")
             loss, loss_dict = compute_discrete_jepa_loss(
                 context_out, 
                 target_out, 
@@ -243,7 +242,7 @@ if __name__ == "__main__":
     total_steps=total_steps,
     pct_start=0.05,                  # 5% warmup as per TD-JEPA
     anneal_strategy='cos',           # Cosine decay is standard used in D-JEPA]
-    div_factor=10.0,                 # defualt = Initial lr = max_lr / 25
+    div_factor=10.0,                 # changed from 25 to 10
     final_div_factor=1e4             # defualt
     )
     encoder = encoder.to(device)
